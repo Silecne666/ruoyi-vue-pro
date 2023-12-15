@@ -1,27 +1,27 @@
 package cn.iocoder.yudao.module.system.service.sms;
 
+import cn.hutool.core.util.StrUtil;
 import cn.iocoder.yudao.framework.common.pojo.PageResult;
+import cn.iocoder.yudao.framework.common.util.object.BeanUtils;
+import cn.iocoder.yudao.framework.sms.core.client.SmsClient;
 import cn.iocoder.yudao.framework.sms.core.client.SmsClientFactory;
 import cn.iocoder.yudao.framework.sms.core.property.SmsChannelProperties;
-import cn.iocoder.yudao.module.system.controller.admin.sms.vo.channel.SmsChannelCreateReqVO;
 import cn.iocoder.yudao.module.system.controller.admin.sms.vo.channel.SmsChannelPageReqVO;
-import cn.iocoder.yudao.module.system.controller.admin.sms.vo.channel.SmsChannelUpdateReqVO;
-import cn.iocoder.yudao.module.system.convert.sms.SmsChannelConvert;
+import cn.iocoder.yudao.module.system.controller.admin.sms.vo.channel.SmsChannelSaveReqVO;
 import cn.iocoder.yudao.module.system.dal.dataobject.sms.SmsChannelDO;
 import cn.iocoder.yudao.module.system.dal.mysql.sms.SmsChannelMapper;
-import cn.iocoder.yudao.module.system.mq.producer.sms.SmsProducer;
+import com.google.common.cache.CacheLoader;
+import com.google.common.cache.LoadingCache;
+import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
-import javax.annotation.PostConstruct;
 import javax.annotation.Resource;
-import java.time.LocalDateTime;
-import java.util.Collection;
+import java.time.Duration;
 import java.util.List;
 
 import static cn.iocoder.yudao.framework.common.exception.util.ServiceExceptionUtil.exception;
-import static cn.iocoder.yudao.framework.common.util.collection.CollectionUtils.getMaxValue;
+import static cn.iocoder.yudao.framework.common.util.cache.CacheUtils.buildAsyncReloadingCache;
 import static cn.iocoder.yudao.module.system.enums.ErrorCodeConstants.SMS_CHANNEL_HAS_CHILDREN;
 import static cn.iocoder.yudao.module.system.enums.ErrorCodeConstants.SMS_CHANNEL_NOT_EXISTS;
 
@@ -35,15 +35,44 @@ import static cn.iocoder.yudao.module.system.enums.ErrorCodeConstants.SMS_CHANNE
 public class SmsChannelServiceImpl implements SmsChannelService {
 
     /**
-     * 定时执行 {@link #schedulePeriodicRefresh()} 的周期
-     * 因为已经通过 Redis Pub/Sub 机制，所以频率不需要高
+     * {@link SmsClient} 缓存，通过它异步刷新 smsClientFactory
      */
-    private static final long SCHEDULER_PERIOD = 5 * 60 * 1000L;
+    @Getter
+    private final LoadingCache<Long, SmsClient> idClientCache = buildAsyncReloadingCache(Duration.ofSeconds(10L),
+            new CacheLoader<Long, SmsClient>() {
+
+                @Override
+                public SmsClient load(Long id) {
+                    // 查询，然后尝试刷新
+                    SmsChannelDO channel = smsChannelMapper.selectById(id);
+                    if (channel != null) {
+                        SmsChannelProperties properties = BeanUtils.toBean(channel, SmsChannelProperties.class);
+                        smsClientFactory.createOrUpdateSmsClient(properties);
+                    }
+                    return smsClientFactory.getSmsClient(id);
+                }
+
+            });
 
     /**
-     * 缓存菜单的最大更新时间，用于后续的增量轮询，判断是否有更新
+     * {@link SmsClient} 缓存，通过它异步刷新 smsClientFactory
      */
-    private volatile LocalDateTime maxUpdateTime;
+    @Getter
+    private final LoadingCache<String, SmsClient> codeClientCache = buildAsyncReloadingCache(Duration.ofSeconds(60L),
+            new CacheLoader<String, SmsClient>() {
+
+                @Override
+                public SmsClient load(String code) {
+                    // 查询，然后尝试刷新
+                    SmsChannelDO channel = smsChannelMapper.selectByCode(code);
+                    if (channel != null) {
+                        SmsChannelProperties properties = BeanUtils.toBean(channel, SmsChannelProperties.class);
+                        smsClientFactory.createOrUpdateSmsClient(properties);
+                    }
+                    return smsClientFactory.getSmsClient(code);
+                }
+
+            });
 
     @Resource
     private SmsClientFactory smsClientFactory;
@@ -54,96 +83,64 @@ public class SmsChannelServiceImpl implements SmsChannelService {
     @Resource
     private SmsTemplateService smsTemplateService;
 
-    @Resource
-    private SmsProducer smsProducer;
-
     @Override
-    @PostConstruct
-    public void initLocalCache() {
-        initLocalCacheIfUpdate(null);
-    }
-
-    @Scheduled(fixedDelay = SCHEDULER_PERIOD, initialDelay = SCHEDULER_PERIOD)
-    public void schedulePeriodicRefresh() {
-        initLocalCacheIfUpdate(this.maxUpdateTime);
-    }
-
-    /**
-     * 刷新本地缓存
-     *
-     * @param maxUpdateTime 最大更新时间
-     *                      1. 如果 maxUpdateTime 为 null，则“强制”刷新缓存
-     *                      2. 如果 maxUpdateTime 不为 null，判断自 maxUpdateTime 是否有数据发生变化，有的情况下才刷新缓存
-     */
-    private void initLocalCacheIfUpdate(LocalDateTime maxUpdateTime) {
-        // 第一步：基于 maxUpdateTime 判断缓存是否刷新。
-        // 如果没有增量的数据变化，则不进行本地缓存的刷新
-        if (maxUpdateTime != null
-                && smsChannelMapper.selectCountByUpdateTimeGt(maxUpdateTime) == 0) {
-            log.info("[initLocalCacheIfUpdate][数据未发生变化({})，本地缓存不刷新]", maxUpdateTime);
-            return;
-        }
-        List<SmsChannelDO> channels = smsChannelMapper.selectList();
-        log.info("[initLocalCacheIfUpdate][缓存短信渠道，数量为:{}]", channels.size());
-
-        // 第二步：构建缓存。创建或更新短信 Client
-        List<SmsChannelProperties> propertiesList = SmsChannelConvert.INSTANCE.convertList02(channels);
-        propertiesList.forEach(properties -> smsClientFactory.createOrUpdateSmsClient(properties));
-
-        // 第三步：设置最新的 maxUpdateTime，用于下次的增量判断。
-        this.maxUpdateTime = getMaxValue(channels, SmsChannelDO::getUpdateTime);
+    public Long createSmsChannel(SmsChannelSaveReqVO createReqVO) {
+        SmsChannelDO channel = BeanUtils.toBean(createReqVO, SmsChannelDO.class);
+        smsChannelMapper.insert(channel);
+        return channel.getId();
     }
 
     @Override
-    public Long createSmsChannel(SmsChannelCreateReqVO createReqVO) {
-        // 插入
-        SmsChannelDO smsChannel = SmsChannelConvert.INSTANCE.convert(createReqVO);
-        smsChannelMapper.insert(smsChannel);
-        // 发送刷新消息
-        smsProducer.sendSmsChannelRefreshMessage();
-        // 返回
-        return smsChannel.getId();
-    }
-
-    @Override
-    public void updateSmsChannel(SmsChannelUpdateReqVO updateReqVO) {
+    public void updateSmsChannel(SmsChannelSaveReqVO updateReqVO) {
         // 校验存在
-        this.validateSmsChannelExists(updateReqVO.getId());
+        SmsChannelDO channel = validateSmsChannelExists(updateReqVO.getId());
         // 更新
-        SmsChannelDO updateObj = SmsChannelConvert.INSTANCE.convert(updateReqVO);
+        SmsChannelDO updateObj = BeanUtils.toBean(updateReqVO, SmsChannelDO.class);
         smsChannelMapper.updateById(updateObj);
-        // 发送刷新消息
-        smsProducer.sendSmsChannelRefreshMessage();
+
+        // 清空缓存
+        clearCache(updateReqVO.getId(), channel.getCode());
     }
 
     @Override
     public void deleteSmsChannel(Long id) {
         // 校验存在
-        this.validateSmsChannelExists(id);
-        // 校验是否有字典数据
-        if (smsTemplateService.countByChannelId(id) > 0) {
+        SmsChannelDO channel = validateSmsChannelExists(id);
+        // 校验是否有在使用该账号的模版
+        if (smsTemplateService.getSmsTemplateCountByChannelId(id) > 0) {
             throw exception(SMS_CHANNEL_HAS_CHILDREN);
         }
         // 删除
         smsChannelMapper.deleteById(id);
-        // 发送刷新消息
-        smsProducer.sendSmsChannelRefreshMessage();
+
+        // 清空缓存
+        clearCache(id, channel.getCode());
     }
 
-    private void validateSmsChannelExists(Long id) {
-        if (smsChannelMapper.selectById(id) == null) {
+    /**
+     * 清空指定渠道编号的缓存
+     *
+     * @param id 渠道编号
+     * @param code 渠道编码
+     */
+    private void clearCache(Long id, String code) {
+        idClientCache.invalidate(id);
+        if (StrUtil.isNotEmpty(code)) {
+            codeClientCache.invalidate(code);
+        }
+    }
+
+    private SmsChannelDO validateSmsChannelExists(Long id) {
+        SmsChannelDO channel = smsChannelMapper.selectById(id);
+        if (channel == null) {
             throw exception(SMS_CHANNEL_NOT_EXISTS);
         }
+        return channel;
     }
 
     @Override
     public SmsChannelDO getSmsChannel(Long id) {
         return smsChannelMapper.selectById(id);
-    }
-
-    @Override
-    public List<SmsChannelDO> getSmsChannelList(Collection<Long> ids) {
-        return smsChannelMapper.selectBatchIds(ids);
     }
 
     @Override
@@ -154,6 +151,16 @@ public class SmsChannelServiceImpl implements SmsChannelService {
     @Override
     public PageResult<SmsChannelDO> getSmsChannelPage(SmsChannelPageReqVO pageReqVO) {
         return smsChannelMapper.selectPage(pageReqVO);
+    }
+
+    @Override
+    public SmsClient getSmsClient(Long id) {
+        return idClientCache.getUnchecked(id);
+    }
+
+    @Override
+    public SmsClient getSmsClient(String code) {
+        return codeClientCache.getUnchecked(code);
     }
 
 }

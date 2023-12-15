@@ -1,26 +1,20 @@
 package cn.iocoder.yudao.module.promotion.controller.admin.banner.vo;
 
-import io.swagger.annotations.ApiModel;
-import io.swagger.annotations.ApiModelProperty;
+import io.swagger.v3.oas.annotations.media.Schema;
 import lombok.Data;
 import lombok.ToString;
 
-import javax.validation.constraints.NotNull;
 import java.time.LocalDateTime;
 
-/**
- * @author xia
- */
-@ApiModel("管理后台 - Banner Response VO")
+@Schema(description = "管理后台 - Banner Response VO")
 @Data
 @ToString(callSuper = true)
 public class BannerRespVO  extends BannerBaseVO {
 
-    @ApiModelProperty(value = "banner编号", required = true)
-    @NotNull(message = "banner编号不能为空")
+    @Schema(description = "编号", requiredMode = Schema.RequiredMode.REQUIRED)
     private Long id;
 
-    @ApiModelProperty(value = "创建时间", required = true)
+    @Schema(description = "创建时间", requiredMode = Schema.RequiredMode.REQUIRED, example = "2022-07-01 23:59:59")
     private LocalDateTime createTime;
 
 }

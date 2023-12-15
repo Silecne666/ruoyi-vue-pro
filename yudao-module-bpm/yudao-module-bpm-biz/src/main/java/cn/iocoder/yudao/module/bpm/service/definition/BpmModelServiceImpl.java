@@ -202,7 +202,7 @@ public class BpmModelServiceImpl implements BpmModelService {
         }
         // 执行删除
         repositoryService.deleteModel(id);
-        // 禁用流程实例
+        // 禁用流程定义
         updateProcessDefinitionSuspended(model.getDeploymentId());
     }
 
@@ -231,6 +231,11 @@ public class BpmModelServiceImpl implements BpmModelService {
         }
         BpmnXMLConverter converter = new BpmnXMLConverter();
         return converter.convertToBpmnModel(new BytesStreamSource(bpmnBytes), true, true);
+    }
+
+    @Override
+    public BpmnModel getBpmnModelByDefinitionId(String processDefinitionId) {
+        return repositoryService.getBpmnModel(processDefinitionId);
     }
 
     private void checkKeyNCName(String key) {
@@ -282,6 +287,5 @@ public class BpmModelServiceImpl implements BpmModelService {
         }
         processDefinitionService.updateProcessDefinitionState(oldDefinition.getId(), SuspensionState.SUSPENDED.getStateCode());
     }
-
 
 }

@@ -4,11 +4,9 @@ import cn.hutool.core.collection.CollUtil;
 import cn.iocoder.yudao.framework.common.enums.CommonStatusEnum;
 import cn.iocoder.yudao.framework.common.pojo.PageResult;
 import cn.iocoder.yudao.framework.common.util.collection.CollectionUtils;
-import cn.iocoder.yudao.module.system.controller.admin.dict.vo.data.DictDataCreateReqVO;
-import cn.iocoder.yudao.module.system.controller.admin.dict.vo.data.DictDataExportReqVO;
+import cn.iocoder.yudao.framework.common.util.object.BeanUtils;
 import cn.iocoder.yudao.module.system.controller.admin.dict.vo.data.DictDataPageReqVO;
-import cn.iocoder.yudao.module.system.controller.admin.dict.vo.data.DictDataUpdateReqVO;
-import cn.iocoder.yudao.module.system.convert.dict.DictDataConvert;
+import cn.iocoder.yudao.module.system.controller.admin.dict.vo.data.DictDataSaveReqVO;
 import cn.iocoder.yudao.module.system.dal.dataobject.dict.DictDataDO;
 import cn.iocoder.yudao.module.system.dal.dataobject.dict.DictTypeDO;
 import cn.iocoder.yudao.module.system.dal.mysql.dict.DictDataMapper;
@@ -48,22 +46,15 @@ public class DictDataServiceImpl implements DictDataService {
     private DictDataMapper dictDataMapper;
 
     @Override
-    public List<DictDataDO> getDictDatas() {
-        List<DictDataDO> list = dictDataMapper.selectList();
+    public List<DictDataDO> getDictDataList(Integer status, String dictType) {
+        List<DictDataDO> list = dictDataMapper.selectListByStatusAndDictType(status, dictType);
         list.sort(COMPARATOR_TYPE_AND_SORT);
         return list;
     }
 
     @Override
-    public PageResult<DictDataDO> getDictDataPage(DictDataPageReqVO reqVO) {
-        return dictDataMapper.selectPage(reqVO);
-    }
-
-    @Override
-    public List<DictDataDO> getDictDatas(DictDataExportReqVO reqVO) {
-        List<DictDataDO> list = dictDataMapper.selectList(reqVO);
-        list.sort(COMPARATOR_TYPE_AND_SORT);
-        return list;
+    public PageResult<DictDataDO> getDictDataPage(DictDataPageReqVO pageReqVO) {
+        return dictDataMapper.selectPage(pageReqVO);
     }
 
     @Override
@@ -72,52 +63,48 @@ public class DictDataServiceImpl implements DictDataService {
     }
 
     @Override
-    public Long createDictData(DictDataCreateReqVO reqVO) {
-        // 校验正确性
-        checkCreateOrUpdate(null, reqVO.getValue(), reqVO.getDictType());
+    public Long createDictData(DictDataSaveReqVO createReqVO) {
+        // 校验字典类型有效
+        validateDictTypeExists(createReqVO.getDictType());
+        // 校验字典数据的值的唯一性
+        validateDictDataValueUnique(null, createReqVO.getDictType(), createReqVO.getValue());
 
         // 插入字典类型
-        DictDataDO dictData = DictDataConvert.INSTANCE.convert(reqVO);
+        DictDataDO dictData = BeanUtils.toBean(createReqVO, DictDataDO.class);
         dictDataMapper.insert(dictData);
         return dictData.getId();
     }
 
     @Override
-    public void updateDictData(DictDataUpdateReqVO reqVO) {
-        // 校验正确性
-        checkCreateOrUpdate(reqVO.getId(), reqVO.getValue(), reqVO.getDictType());
+    public void updateDictData(DictDataSaveReqVO updateReqVO) {
+        // 校验自己存在
+        validateDictDataExists(updateReqVO.getId());
+        // 校验字典类型有效
+        validateDictTypeExists(updateReqVO.getDictType());
+        // 校验字典数据的值的唯一性
+        validateDictDataValueUnique(updateReqVO.getId(), updateReqVO.getDictType(), updateReqVO.getValue());
 
         // 更新字典类型
-        DictDataDO updateObj = DictDataConvert.INSTANCE.convert(reqVO);
+        DictDataDO updateObj = BeanUtils.toBean(updateReqVO, DictDataDO.class);
         dictDataMapper.updateById(updateObj);
     }
 
     @Override
     public void deleteDictData(Long id) {
         // 校验是否存在
-        checkDictDataExists(id);
+        validateDictDataExists(id);
 
         // 删除字典数据
         dictDataMapper.deleteById(id);
     }
 
     @Override
-    public long countByDictType(String dictType) {
+    public long getDictDataCountByDictType(String dictType) {
         return dictDataMapper.selectCountByDictType(dictType);
     }
 
-
-    private void checkCreateOrUpdate(Long id, String value, String dictType) {
-        // 校验自己存在
-        checkDictDataExists(id);
-        // 校验字典类型有效
-        checkDictTypeValid(dictType);
-        // 校验字典数据的值的唯一性
-        checkDictDataValueUnique(id, dictType, value);
-    }
-
     @VisibleForTesting
-    public void checkDictDataValueUnique(Long id, String dictType, String value) {
+    public void validateDictDataValueUnique(Long id, String dictType, String value) {
         DictDataDO dictData = dictDataMapper.selectByDictTypeAndValue(dictType, value);
         if (dictData == null) {
             return;
@@ -132,7 +119,7 @@ public class DictDataServiceImpl implements DictDataService {
     }
 
     @VisibleForTesting
-    public void checkDictDataExists(Long id) {
+    public void validateDictDataExists(Long id) {
         if (id == null) {
             return;
         }
@@ -143,7 +130,7 @@ public class DictDataServiceImpl implements DictDataService {
     }
 
     @VisibleForTesting
-    public void checkDictTypeValid(String type) {
+    public void validateDictTypeExists(String type) {
         DictTypeDO dictType = dictTypeService.getDictType(type);
         if (dictType == null) {
             throw exception(DICT_TYPE_NOT_EXISTS);
@@ -154,7 +141,7 @@ public class DictDataServiceImpl implements DictDataService {
     }
 
     @Override
-    public void validDictDatas(String dictType, Collection<String> values) {
+    public void validateDictDataList(String dictType, Collection<String> values) {
         if (CollUtil.isEmpty(values)) {
             return;
         }
